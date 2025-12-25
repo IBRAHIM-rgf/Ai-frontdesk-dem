@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Cyber Swiss IA — AI Front Desk Demo</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">CS</div>
+        <div>
+          <div class="title">Cyber Swiss IA</div>
+          <div class="subtitle">AI Front Desk — Démo Clinique (15k/mois)</div>
+        </div>
+      </div>
+
+      <div class="controls">
+        <select id="vertical">
+          <option>Dentaire</option>
+          <option>Esthétique</option>
+          <option>Clinique multi-spécialités</option>
+        </select>
+        <button id="reset" class="ghost">Reset</button>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="panel chat">
+        <div class="chatHeader">
+          <div>
+            <div class="panelTitle">Conversation</div>
+            <div class="panelHint">Essaye : “J’ai mal à une dent”, “consultation botox”, “RDV dermato site A”.</div>
+          </div>
+          <div class="badge" id="sessionBadge">Session: —</div>
+        </div>
+
+        <div id="messages" class="messages"></div>
+
+        <form id="composer" class="composer">
+          <input id="input" autocomplete="off" placeholder="Écrivez un message…" />
+          <button type="submit">Envoyer</button>
+        </form>
+      </section>
+
+      <section class="panel side">
+        <div class="panelTitle">Agenda</div>
+        <div class="panelHint">Les actions “create/reschedule/cancel” apparaissent ici.</div>
+        <div id="appointments" class="table"></div>
+
+        <div class="divider"></div>
+
+        <div class="panelTitle">Tickets / Handoff</div>
+        <div class="panelHint">Plainte / litige / cas sensible → ticket + rappel.</div>
+        <div id="tickets" class="table"></div>
+
+        <div class="divider"></div>
+
+        <div class="panelTitle">Slots disponibles</div>
+        <div id="slots" class="table"></div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      © Arkneysagency — Démo “Cyber Swiss IA style” — Vercel-ready
+    </footer>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
