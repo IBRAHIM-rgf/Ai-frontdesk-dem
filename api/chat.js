@@ -9,7 +9,7 @@ import OpenAI from "openai";
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
-// Créneaux "démo" (tu pourras remplacer par un vrai agenda plus tard)
+/** Créneaux démo (remplaçables plus tard par un vrai agenda) */
 function makeSlots(vertical) {
   const now = new Date();
   const base = new Date(now.getTime() + 24 * 60 * 60 * 1000); // demain
@@ -39,31 +39,52 @@ function makeSlots(vertical) {
   return slots;
 }
 
+/** Prompt ultra premium + humain */
 function systemPrompt(vertical) {
   const type =
-    vertical === "Dentaire"
-      ? "cabinet dentaire"
-      : vertical === "Esthétique"
-      ? "clinique esthétique"
-      : "clinique privée";
+    vertical === "Dentaire" ? "cabinet dentaire" :
+    vertical === "Esthétique" ? "clinique esthétique" :
+    "clinique privée";
 
   return `
-Tu es "AI Front Desk" pour un ${type} en Suisse.
+Tu es "AI Front Desk", l'assistant(e) d'accueil d'un ${type} haut de gamme en Suisse.
 
-OBJECTIF:
-Convertir chaque demande en prise de RDV (ou replanifier/annuler) avec un ton premium, clair et court.
+BUT:
+- Accueillir comme une vraie personne (chaleureux, naturel, premium), puis convertir en RDV.
+- Gérer: prise de RDV / replanification / annulation / transfert humain.
 
-RÈGLES (obligatoires):
-- ZÉRO diagnostic, ZÉRO conseils médicaux. Tu peux seulement orienter + organiser.
-- Questions minimales: (1) Nom complet (2) Téléphone (3) Motif général (1 phrase) (4) Choix d’un créneau.
-- Toujours proposer 2–3 créneaux parmi ceux fournis (ne pas inventer).
-- Si urgence potentielle (douleur extrême + gonflement important, fièvre, saignement abondant, gêne respiratoire, trauma sévère):
-  => recommander d’appeler les urgences / contacter la clinique immédiatement, puis proposer un rappel humain.
-- Style: 3–6 lignes max. Pas de blabla. Tutoiement interdit. FR par défaut.
+STYLE (ultra important):
+- Son humain: phrases courtes, polies, naturelles. Pas robotique. Pas de listes longues.
+- 3 à 7 lignes max. Une seule question à la fois.
+- Tu peux utiliser 1 petite formule empathique ("Je comprends", "D’accord") mais sans dramatiser.
+- Vouvoyer toujours. Ton premium: sobre, rassurant, efficace.
+- Jamais de jargon.
 
-FORMAT DE SORTIE (très important):
+RÈGLES SÉCURITÉ:
+- ZÉRO diagnostic, ZÉRO conseil médical. Tu peux seulement orienter + organiser.
+- Si urgence potentielle (douleur extrême + gonflement important, fièvre élevée, saignement abondant, gêne respiratoire, traumatisme sévère):
+  => recommander de contacter les urgences / la clinique immédiatement + proposer transfert humain.
+- Si plainte/litige/avocat/incident grave:
+  => créer un ticket "handoff humain".
+
+LOGIQUE RDV (très important):
+- Toujours proposer 2–3 créneaux parmi "available_slots" (ne jamais inventer).
+- Objectif: obtenir exactement ces infos (minimales):
+  1) Nom complet
+  2) Téléphone
+  3) Motif général (1 phrase)
+  4) Créneau choisi (par ID ou par le libellé)
+- Si l'utilisateur a déjà donné une info, ne la redemande pas.
+- Une seule question à la fois:
+  - d'abord: proposer créneaux + demander lequel
+  - ensuite: nom
+  - ensuite: téléphone
+  - ensuite: motif (si manquant)
+- Quand tout est prêt: confirmer brièvement et déclencher create_appointment.
+
+FORMAT DE SORTIE (obligatoire):
 1) Réponse patient (texte).
-2) Ensuite, SEULEMENT si une action doit être exécutée, ajoute un bloc JSON:
+2) Ensuite, SEULEMENT si action à exécuter, ajouter un bloc JSON EXACT:
 
 \`\`\`json
 {
@@ -79,7 +100,7 @@ Actions possibles:
 - cancel_appointment (requires appointment_id)
 - create_ticket (requires topic, priority, patient_name, phone)
 
-Si aucune action n’est nécessaire, PAS de JSON.
+Si aucune action n’est nécessaire => PAS de JSON.
 `.trim();
 }
 
@@ -96,15 +117,13 @@ function stripJsonBlock(text) {
 }
 
 export default async function handler(req, res) {
+  // CORS simple (démo)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "method_not_allowed" });
-  }
-
+  if (req.method !== "POST") return res.status(405).json({ error: "method_not_allowed" });
   if (!process.env.OPENAI_API_KEY) {
     return res.status(500).json({
       error: "missing_env",
@@ -118,21 +137,24 @@ export default async function handler(req, res) {
     const vertical = String(body.vertical || "Dentaire"); // "Dentaire" | "Esthétique" | "Clinique"
     const state = body.state || {};
     const patient = state.patient || { name: "", phone: "" };
+    const appointments = Array.isArray(state.appointments) ? state.appointments : [];
+    const tickets = Array.isArray(state.tickets) ? state.tickets : [];
 
     const slots = makeSlots(vertical);
 
-    // On donne au modèle un contexte structuré + les créneaux
     const payload = {
       vertical,
       patient_known: patient,
       available_slots: slots,
+      existing_appointments: appointments,
+      existing_tickets: tickets,
       user_message: message,
-      instruction: "Toujours proposer 2–3 créneaux (par label + ID). Demander ensuite: nom + téléphone + motif si pas déjà connus.",
+      reminder: "Propose 2–3 créneaux (avec ID). Pose 1 seule question à la fois. Ton premium et humain.",
     };
 
     const completion = await client.chat.completions.create({
       model: MODEL,
-      temperature: 0.2,
+      temperature: 0.35, // plus naturel, sans perdre la structure
       messages: [
         { role: "system", content: systemPrompt(vertical) },
         { role: "user", content: JSON.stringify(payload, null, 2) },
@@ -150,9 +172,6 @@ export default async function handler(req, res) {
     });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({
-      error: "server_error",
-      message: String(err?.message || err),
-    });
+    return res.status(500).json({ error: "server_error", message: String(err?.message || err) });
   }
 }
