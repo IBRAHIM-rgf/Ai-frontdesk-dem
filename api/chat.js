@@ -3,11 +3,26 @@ import OpenAI from "openai";
 /**
  * Vercel Serverless Function: /api/chat
  * Env required: OPENAI_API_KEY
- * Optional: OPENAI_MODEL (ex: gpt-5.2)
+ * Optional: OPENAI_MODEL
  */
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const MODEL = process.env.OPENAI_MODEL || "gpt-5.2";
+const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+/** Robust JSON body parsing for Vercel functions */
+async function readJson(req) {
+  if (req?.body && typeof req.body === "object") return req.body;
+
+  const chunks = [];
+  for await (const c of req) chunks.push(c);
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { _raw: raw };
+  }
+}
 
 function makeSlots(vertical) {
   const now = new Date();
@@ -27,7 +42,7 @@ function makeSlots(vertical) {
     d.setHours(hours[i], 0, 0, 0);
     slots.push({
       id: `S${i + 1}`,
-      datetime: d.toISOString().slice(0, 16), // YYYY-MM-DDTHH:MM
+      datetime: d.toISOString().slice(0, 16),
       label: d.toLocaleString("fr-CH", {
         weekday: "short",
         day: "2-digit",
@@ -41,64 +56,60 @@ function makeSlots(vertical) {
 }
 
 function systemPrompt(vertical) {
-  const clinic =
+  const label =
     vertical === "Esthétique"
-      ? "clinique esthétique premium"
+      ? "clinique esthétique"
       : vertical === "Dentaire"
-        ? "cabinet/clinique dentaire premium"
-        : "clinique multi-spécialités premium";
+        ? "cabinet/clinique dentaire"
+        : "clinique multi-spécialités";
 
   return `
-Tu es "AI Front Desk", la réceptionniste virtuelle d’une ${clinic}.
-Ton objectif : accueillir, rassurer, qualifier la demande, puis proposer et confirmer un RDV.
+Tu es "AI Front Desk", l'assistante d'accueil d'une ${label}.
+Objectif: répondre comme une vraie personne (chaleureuse, pro, premium) et convertir en RDV, ou replanifier/annuler, ou escalader à un humain.
 
-STYLE (très important)
-- Tu parles comme une vraie personne : chaleureux, naturel, très professionnel, concis.
-- Tu poses UNE question à la fois (maximum 2 si vraiment nécessaire).
+STYLE (important):
+- Naturel, humain, empathique (comme une réceptionniste).
+- Phrases courtes. 1 question à la fois.
+- Tu peux utiliser le prénom si connu.
 - Tu reformules brièvement pour montrer que tu as compris.
 
-SÉCURITÉ / MÉDICAL
-- ZÉRO diagnostic et ZÉRO conseil médical.
-- Tu peux orienter (urgence -> urgences) sans interprétation médicale.
-- Si urgence vitale / douleur extrême / saignement important / malaise : recommander urgences / appeler 144 (CH) et proposer transfert humain.
+RÈGLES MÉDICALES (obligatoires):
+- AUCUN diagnostic. AUCUN conseil médical/traitement.
+- Tu peux seulement: orienter, proposer un RDV, expliquer les étapes, demander des infos administratives.
+- Si l'utilisateur mentionne symptômes graves/urgence vitale (détresse respiratoire, malaise sévère, saignement incontrôlable, douleur extrême + signes inquiétants, etc.): recommander de contacter immédiatement les urgences/112 (ou le service d'urgence local) et proposer un transfert humain.
+- Si plainte/litige/avocat/incident grave: créer un ticket "handoff humain" (priorité élevée) et rester factuel.
 
-DONNÉES À COLLECTER (minimum)
-- Nom + téléphone
+DONNÉES À COLLECTER (minimal):
+- Nom + téléphone (si pas déjà connu)
 - Motif général (ex: douleur dentaire, contrôle, esthétique…)
-- Site (si nécessaire)
-- Un créneau parmi ceux fournis
+- Site (si multi-sites)
+- Créneau choisi (parmi ceux fournis)
 
-RÈGLES RDV
-- Toujours proposer 2–3 créneaux parmi "available_slots".
-- Quand l’utilisateur choisit un créneau : confirmer + demander les infos manquantes (nom/téléphone).
-- Si plainte/litige/avocat/incident : créer un ticket handoff humain.
+LOGIQUE RDV:
+- Si demande de RDV: propose 2–3 créneaux parmi "available_slots".
+- Si l'utilisateur hésite: propose 2 créneaux + demande préférence (matin/après-midi).
+- Si l'utilisateur donne un créneau hors liste: propose le plus proche.
+- Toujours confirmer: "Je récapitule: … C'est ok pour vous ?"
 
-FORMAT DE SORTIE OBLIGATOIRE
-1) Réponse normale au patient (FR).
-2) Puis UNIQUEMENT si une action doit être exécutée, ajoute EXACTEMENT un bloc JSON:
+FORMAT DE SORTIE (très important):
+1) D'abord une réponse normale pour le patient (FR par défaut).
+2) Ensuite, SEULEMENT si une action doit être exécutée, ajoute un bloc code JSON EXACT:
 
 \`\`\`json
 {
   "actions":[
-    {
-      "type":"create_appointment",
-      "patient_name":"...",
-      "phone":"+41...",
-      "reason":"...",
-      "datetime":"YYYY-MM-DDTHH:MM",
-      "site":"Site A|Site B|"
-    }
+    {"type":"create_appointment","patient_name":"...","phone":"+41...","reason":"...","datetime":"YYYY-MM-DDTHH:MM","site":"Site A|Site B|"}
   ]
 }
 \`\`\`
 
 Actions possibles:
 - create_appointment
-- reschedule_appointment (appointment_id + new_datetime)
-- cancel_appointment (appointment_id)
-- create_ticket (topic, priority, patient_name, phone)
+- reschedule_appointment (requires appointment_id + new_datetime)
+- cancel_appointment (requires appointment_id)
+- create_ticket (requires topic, priority, patient_name, phone)
 
-Si aucune action n’est nécessaire, ne mets PAS de JSON.
+Si aucune action n'est nécessaire, ne mets PAS de JSON.
 `.trim();
 }
 
@@ -116,17 +127,72 @@ function extractJsonBlock(text) {
 }
 
 function stripJsonBlock(text) {
-  return String(text || "").replace(/```json[\s\S]*?```/g, "").trim();
+  return (text || "").replace(/```json[\s\S]*?```/g, "").trim();
 }
 
 export default async function handler(req, res) {
+  // CORS (safe even if same-domain)
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "method_not_allowed" });
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(500).json({
+      error: "missing_env",
+      message: "Missing OPENAI_API_KEY. Add it in Vercel → Project → Settings → Environment Variables.",
+    });
+  }
+
   try {
-    // CORS (utile si tu appelles l’API depuis un autre domaine)
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    const body = await readJson(req);
 
-    if (req.method === "OPTIONS") return res.status(200).end();
-    if (req.method !== "POST") return res.status(405
+    const message = String(body.message || "");
+    const vertical = String(body.vertical || "Dentaire");
+    const state = body.state || {};
 
+    const patient = state.patient || { name: "", phone: "" };
+    const appointments = Array.isArray(state.appointments) ? state.appointments : [];
+    const tickets = Array.isArray(state.tickets) ? state.tickets : [];
 
+    const slots = makeSlots(vertical);
+
+    const userPayload = {
+      vertical,
+      patient_known: patient,
+      available_slots: slots,
+      existing_appointments: appointments,
+      existing_tickets: tickets,
+      user_message: message,
+      instructions:
+        "Pour déplacer/annuler, demande à l'utilisateur de copier l'ID depuis la colonne 'ID' (Agenda).",
+    };
+
+    const response = await client.responses.create({
+      model: MODEL,
+      input: [
+        { role: "developer", content: systemPrompt(vertical) },
+        { role: "user", content: JSON.stringify(userPayload, null, 2) },
+      ],
+      max_output_tokens: 500,
+    });
+
+    const raw = response.output_text || "";
+    const parsed = extractJsonBlock(raw);
+    const reply = stripJsonBlock(raw);
+
+    return res.status(200).json({
+      reply: reply || "D’accord — dites-moi simplement ce que vous souhaitez faire (prendre un RDV, déplacer, annuler, ou une question) 🙂",
+      actions: parsed?.actions || [],
+      slots,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      error: "server_error",
+      message: String(err?.message || err),
+    });
+  }
+}
