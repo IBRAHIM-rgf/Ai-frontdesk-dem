@@ -1,28 +1,7 @@
-import OpenAI from "openai";
-
-/**
- * Vercel Serverless Function: /api/chat
- * Env required: OPENAI_API_KEY
- * Optional: OPENAI_MODEL
- */
-
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-
-/** Robust JSON body parsing for Vercel functions */
-async function readJson(req) {
-  if (req?.body && typeof req.body === "object") return req.body;
-
-  const chunks = [];
-  for await (const c of req) chunks.push(c);
-  const raw = Buffer.concat(chunks).toString("utf8").trim();
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return { _raw: raw };
-  }
-}
+// api/chat.js
+// Vercel Serverless Function: POST /api/chat
+// Env required: OPENAI_API_KEY
+// Optional: OPENAI_MODEL (default: gpt-4o-mini)
 
 function makeSlots(vertical) {
   const now = new Date();
@@ -33,16 +12,17 @@ function makeSlots(vertical) {
     vertical === "Dentaire"
       ? [9, 11, 15, 17, 10, 16]
       : vertical === "Esthétique"
-        ? [12, 14, 18, 11, 16, 19]
-        : [10, 13, 15, 9, 11, 17];
+      ? [12, 14, 18, 11, 16, 19]
+      : [10, 13, 15, 9, 11, 17];
 
   const slots = [];
   for (let i = 0; i < hours.length; i++) {
     const d = new Date(base.getTime() + Math.floor(i / 2) * 24 * 60 * 60 * 1000);
     d.setHours(hours[i], 0, 0, 0);
+
     slots.push({
       id: `S${i + 1}`,
-      datetime: d.toISOString().slice(0, 16),
+      datetime: d.toISOString().slice(0, 16), // YYYY-MM-DDTHH:MM
       label: d.toLocaleString("fr-CH", {
         weekday: "short",
         day: "2-digit",
@@ -58,10 +38,10 @@ function makeSlots(vertical) {
 function systemPrompt(vertical) {
   const brand =
     vertical === "Esthétique"
-      ? "la clinique esthétique"
+      ? "une clinique esthétique"
       : vertical === "Dentaire"
-      ? "le cabinet dentaire"
-      : "la clinique multi-spécialités";
+      ? "un cabinet dentaire"
+      : "une clinique multi-spécialités";
 
   return `
 Tu es "AI Front Desk" : un(e) concierge d’accueil humain(e), chaleureux(se) et premium, pour ${brand}.
@@ -69,49 +49,24 @@ Tu parles comme une vraie personne (naturel, fluide), jamais robotique.
 
 OBJECTIF
 - Transformer la demande en prise de RDV (ou déplacement/annulation) ou escalader vers un humain.
-- Être efficace, rassurant, et très clair.
 
-STYLE (très important)
-- Ton: chaleureux, premium, professionnel, “service 5 étoiles”.
-- Phrases courtes. Une idée par phrase.
-- Montre de l’empathie SANS faire de diagnostic: “Je suis navré(e) que vous ayez ça”, “Je m’en occupe”.
-- Pose 1 question à la fois quand c’est nécessaire.
-- Utilise “vous” (pas de tutoiement).
-- Si le patient a donné son prénom, utilise-le (1 fois de temps en temps, pas à chaque message).
-- Termine souvent par une question simple qui fait avancer (“Quel créneau vous convient ?”).
+STYLE
+- Ton: chaleureux, premium, pro, service 5 étoiles.
+- Phrases courtes. Une question à la fois.
+- Empathie brève SANS diagnostic: "Je suis navré(e) d’apprendre ça. Je m’en occupe."
+- Toujours faire avancer: proposer des créneaux, demander un choix.
 
 RÈGLES (obligatoires)
-- AUCUN diagnostic. AUCUN conseil médical. Aucune recommandation de traitement.
-- Données minimales: prénom+nom, téléphone, motif général, site (si multi-sites), créneau.
-- Si urgence vitale / symptômes graves (détresse respiratoire, saignement important, perte de connaissance, douleur extrême etc.):
-  -> recommander immédiatement d’appeler les urgences locales / service d’urgence.
-  -> proposer un transfert/handoff humain. Sans diagnostic.
-- Si plainte/litige/avocat/incident grave:
-  -> créer un ticket "handoff humain".
-- Toujours proposer 2–3 créneaux (fournis par le système) et demander un choix.
-- Si l’utilisateur demande un prix, répondre poliment que cela dépend des actes et proposer qu’un humain rappelle (ticket) ou proposer RDV.
-
-CONTEXTE
-- Le système te donne: patient connu (nom/tél), créneaux disponibles, RDV existants, tickets existants, et message utilisateur.
-- Tu ne dois PAS inventer de créneaux hors “available_slots”.
-- Si replanification/annulation: demander l’appointment_id (visible dans Agenda).
-
-FLUX DE CONVERSATION RECOMMANDÉ (très humain)
-1) Accueillir + empathie brève + promesse d’aide (“Je m’en occupe”).
-2) Clarifier le besoin en 1 question max (motif général / souhait RDV).
-3) Proposer 2–3 créneaux immédiats (avec libellé), puis demander le choix.
-4) Une fois le créneau choisi: demander nom + téléphone (si inconnus) et le site si nécessaire.
-5) Confirmer avec un récapitulatif premium:
-   - motif général
-   - date/heure
-   - site
-   - contact
-   - “Vous recevrez une confirmation…”
-6) Si besoin: créer action JSON.
+- AUCUN diagnostic, AUCUN conseil médical, AUCUN traitement.
+- Collecte minimale: nom, téléphone, motif général, site (si multi), créneau.
+- Urgence vitale / symptômes graves -> recommander d’appeler les urgences, proposer transfert humain (ticket).
+- Litige/avocat/incident grave -> ticket "handoff humain".
+- Ne JAMAIS inventer de créneaux hors "available_slots".
+- Pour déplacer/annuler: demander l’appointment_id (visible dans Agenda).
 
 FORMAT DE SORTIE (obligatoire)
-1) D’abord une réponse normale pour le patient (FR par défaut, mais si l’utilisateur écrit en EN, réponds en EN).
-2) Ensuite, SI et seulement si une action doit être exécutée, ajoute un bloc JSON EXACTEMENT:
+1) Réponse normale au patient.
+2) SI et seulement si une action doit être exécutée, ajouter un bloc JSON EXACTEMENT:
 
 \`\`\`json
 {
@@ -126,10 +81,7 @@ Actions possibles:
 - reschedule_appointment (requires appointment_id + new_datetime)
 - cancel_appointment (requires appointment_id)
 - create_ticket (requires topic, priority, patient_name, phone)
-
-Si aucune action n'est nécessaire, ne mets PAS de JSON.
 `.trim();
-}
 }
 
 function extractJsonBlock(text) {
@@ -146,11 +98,30 @@ function extractJsonBlock(text) {
 }
 
 function stripJsonBlock(text) {
-  return (text || "").replace(/```json[\s\S]*?```/g, "").trim();
+  return String(text || "").replace(/```json[\s\S]*?```/g, "").trim();
+}
+
+async function readBody(req) {
+  // Vercel peut donner req.body déjà parsé, ou une string
+  if (req.body && typeof req.body === "object") return req.body;
+
+  return await new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => {
+      if (!data) return resolve({});
+      try {
+        resolve(JSON.parse(data));
+      } catch {
+        resolve({ message: data });
+      }
+    });
+    req.on("error", reject);
+  });
 }
 
 export default async function handler(req, res) {
-  // CORS (safe even if same-domain)
+  // (Optionnel) CORS simple
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -161,17 +132,16 @@ export default async function handler(req, res) {
   if (!process.env.OPENAI_API_KEY) {
     return res.status(500).json({
       error: "missing_env",
-      message: "Missing OPENAI_API_KEY. Add it in Vercel → Project → Settings → Environment Variables.",
+      message: "Missing OPENAI_API_KEY. Add it in Vercel → Project Settings → Environment Variables.",
     });
   }
 
   try {
-    const body = await readJson(req);
+    const body = await readBody(req);
 
-    const message = String(body.message || "");
+    const message = String(body.message || "").trim();
     const vertical = String(body.vertical || "Dentaire");
     const state = body.state || {};
-
     const patient = state.patient || { name: "", phone: "" };
     const appointments = Array.isArray(state.appointments) ? state.appointments : [];
     const tickets = Array.isArray(state.tickets) ? state.tickets : [];
@@ -189,26 +159,46 @@ export default async function handler(req, res) {
         "Pour déplacer/annuler, demande à l'utilisateur de copier l'ID depuis la colonne 'ID' (Agenda).",
     };
 
-    const response = await client.responses.create({
-      model: MODEL,
-      input: [
-        { role: "developer", content: systemPrompt(vertical) },
-        { role: "user", content: JSON.stringify(userPayload, null, 2) },
-      ],
-      max_output_tokens: 500,
+    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+    // Appel OpenAI (Chat Completions, très compatible)
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.5,
+        messages: [
+          { role: "system", content: systemPrompt(vertical) },
+          { role: "user", content: JSON.stringify(userPayload, null, 2) },
+        ],
+      }),
     });
 
-    const raw = response.output_text || "";
-    const parsed = extractJsonBlock(raw);
+    if (!resp.ok) {
+      const errText = await resp.text();
+      return res.status(500).json({
+        error: "openai_error",
+        status: resp.status,
+        message: errText.slice(0, 2000),
+      });
+    }
+
+    const data = await resp.json();
+    const raw = data?.choices?.[0]?.message?.content || "";
+
+    const json = extractJsonBlock(raw);
     const reply = stripJsonBlock(raw);
 
     return res.status(200).json({
-      reply: reply || "D’accord — dites-moi simplement ce que vous souhaitez faire (prendre un RDV, déplacer, annuler, ou une question) 🙂",
-      actions: parsed?.actions || [],
+      reply,
+      actions: json?.actions || [],
       slots,
     });
   } catch (err) {
-    console.error(err);
     return res.status(500).json({
       error: "server_error",
       message: String(err?.message || err),
