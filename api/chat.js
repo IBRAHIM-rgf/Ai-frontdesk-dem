@@ -1,7 +1,14 @@
 // api/chat.js
-// POST /api/chat
-// Env: OPENAI_API_KEY
-// Optional: OPENAI_MODEL (default: gpt-4o-mini)
+// Vercel Serverless Function: POST /api/chat
+// Env requis: OPENAI_API_KEY
+// Env optionnel: OPENAI_MODEL (ex: gpt-4o-mini)
+
+import OpenAI from "openai";
+
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+/* ---------- Helpers (slots + prompt) ---------- */
 
 function makeSlots(vertical) {
   const now = new Date();
@@ -19,10 +26,9 @@ function makeSlots(vertical) {
   for (let i = 0; i < hours.length; i++) {
     const d = new Date(base.getTime() + Math.floor(i / 2) * 24 * 60 * 60 * 1000);
     d.setHours(hours[i], 0, 0, 0);
-
     slots.push({
-      id: "S" + (i + 1),
-      datetime: d.toISOString().slice(0, 16),
+      id: `S${i + 1}`,
+      datetime: d.toISOString().slice(0, 16), // YYYY-MM-DDTHH:MM
       label: d.toLocaleString("fr-CH", {
         weekday: "short",
         day: "2-digit",
@@ -35,15 +41,74 @@ function makeSlots(vertical) {
   return slots;
 }
 
+function buildSystemPrompt(vertical) {
+  const type =
+    vertical === "Esthétique"
+      ? "clinique esthétique"
+      : vertical === "Dentaire"
+      ? "cabinet dentaire"
+      : "clinique multi-spécialités";
+
+  return `
+Tu es "AI Front Desk", l’accueil premium d’une ${type}.
+Ta mission: aider vite, rassurer, et convertir en RDV (ou replanifier/annuler), sinon escalader à un humain.
+
+STYLE (important):
+- chaleureux, humain, naturel (comme une vraie personne), mais concis
+- une seule question à la fois
+- phrases courtes, ton premium, pas robotique
+- reformule 1 fois max, puis avance
+
+RÈGLES MÉDICALES (obligatoires):
+- aucun diagnostic, aucune prescription, aucun conseil médical détaillé
+- tu peux: orienter, poser des questions de triage non médicales, proposer un RDV
+- si urgence vitale / détresse (douleur intense + gonflement important + fièvre + difficultés à respirer/avaler, saignement incontrôlable, malaise, etc.):
+  -> recommander immédiatement les urgences / le 144 (Suisse) et proposer un transfert humain
+
+DONNÉES À COLLECTER (minimum):
+- nom
+- téléphone
+- motif général (ex: douleur dentaire, contrôle, esthétique, etc.)
+- site (si multi-sites)
+- créneau choisi (parmi les slots fournis)
+
+PROCESS:
+1) Accueillir + comprendre le besoin (1 question si nécessaire)
+2) Proposer 2–3 créneaux parmi "available_slots"
+3) Demander le choix
+4) Si l’utilisateur confirme: demander nom + téléphone si manquants, puis créer l’action
+
+ACTIONS (si nécessaire uniquement) :
+Réponds d’abord normalement au patient.
+Puis, SI une action doit être exécutée, ajoute un bloc JSON exactement:
+
+\`\`\`json
+{
+  "actions":[
+    {"type":"create_appointment","patient_name":"...","phone":"+41...","reason":"...","datetime":"YYYY-MM-DDTHH:MM","site":"Site A"}
+  ]
+}
+\`\`\`
+
+Actions possibles:
+- create_appointment
+- reschedule_appointment (appointment_id + new_datetime)
+- cancel_appointment (appointment_id)
+- create_ticket (topic, priority, patient_name, phone)
+
+Si aucune action n’est nécessaire: ne mets PAS de JSON.
+`.trim();
+}
+
 function extractJsonBlock(text) {
   const re = /```json\s*([\s\S]*?)\s*```/g;
-  let match;
+  let m;
   let last = null;
-  while ((match = re.exec(text)) !== null) last = match[1];
+  while ((m = re.exec(text)) !== null) last = m[1];
   if (!last) return null;
   try {
     return JSON.parse(last);
-  } catch (e) {
+  } catch {
     return null;
   }
 }
@@ -55,63 +120,21 @@ function stripJsonBlock(text) {
 async function readBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
 
-  return await new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (chunk) => (data += chunk));
-    req.on("end", () => {
-      if (!data) return resolve({});
-      try {
-        resolve(JSON.parse(data));
-      } catch (e) {
-        resolve({ message: data });
-      }
-    });
-    req.on("error", reject);
-  });
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
-function buildSystemPrompt(vertical) {
-  const brand =
-    vertical === "Esthétique"
-      ? "une clinique esthétique"
-      : vertical === "Dentaire"
-      ? "un cabinet dentaire"
-      : "une clinique multi-spécialités";
-
-  const jsonExample = [
-    "```json",
-    "{",
-    '  "actions":[',
-    '    {"type":"create_appointment","patient_name":"...","phone":"+41...","reason":"...","datetime":"YYYY-MM-DDTHH:MM","site":"Site A|Site B|"}',
-    "  ]",
-    "}",
-    "```",
-  ].join("\n");
-
-  return [
-    'Tu es "AI Front Desk", concierge d’accueil chaleureux et premium, comme une vraie personne, pour ' +
-      brand +
-      ".",
-    "",
-    "OBJECTIF: convertir en RDV, replanifier/annuler, ou escalader à un humain.",
-    "",
-    "RÈGLES:",
-    "- Aucun diagnostic, aucun conseil médical, aucun traitement.",
-    "- Collecte minimale: nom, téléphone, motif général, site (si multi), créneau.",
-    "- Si urgence vitale/symptômes graves: recommander urgences + créer un ticket humain.",
-    "- Litige/avocat/incident grave: créer un ticket humain.",
-    "- Toujours proposer 2–3 créneaux (ceux fournis), demander un choix.",
-    "",
-    "FORMAT DE SORTIE:",
-    "1) Réponse patient (FR), courte, empathique, premium.",
-    "2) Si et seulement si une action est nécessaire, ajoute EXACTEMENT un bloc JSON comme ci-dessous:",
-    jsonExample,
-    "",
-    "Actions possibles: create_appointment, reschedule_appointment, cancel_appointment, create_ticket.",
-  ].join("\n");
-}
+/* ---------- Handler ---------- */
 
 export default async function handler(req, res) {
+  // CORS (si besoin)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -126,64 +149,57 @@ export default async function handler(req, res) {
     });
   }
 
+  const body = await readBody(req);
+  if (body === null) {
+    return res.status(400).json({ error: "invalid_json", message: "Body must be valid JSON." });
+  }
+
+  const message = String(body.message || "");
+  const vertical = String(body.vertical || "Dentaire");
+  const state = body.state || {};
+
+  const patient = state.patient || { name: "", phone: "" };
+  const appointments = Array.isArray(state.appointments) ? state.appointments : [];
+  const tickets = Array.isArray(state.tickets) ? state.tickets : [];
+
+  const slots = makeSlots(vertical);
+
+  const userPayload = {
+    vertical,
+    patient_known: patient,
+    available_slots: slots,
+    existing_appointments: appointments,
+    existing_tickets: tickets,
+    user_message: message,
+    instructions:
+      "Si l’utilisateur veut déplacer/annuler, demande-lui l’appointment_id affiché dans l’Agenda.",
+  };
+
   try {
-    const body = await readBody(req);
-    const message = String(body.message || "").trim();
-    const vertical = String(body.vertical || "Dentaire");
-    const state = body.state || {};
-    const patient = state.patient || { name: "", phone: "" };
-    const appointments = Array.isArray(state.appointments) ? state.appointments : [];
-    const tickets = Array.isArray(state.tickets) ? state.tickets : [];
-
-    const slots = makeSlots(vertical);
-
-    const payload = {
-      vertical: vertical,
-      patient_known: patient,
-      available_slots: slots,
-      existing_appointments: appointments,
-      existing_tickets: tickets,
-      user_message: message,
-      instructions:
-        "Pour déplacer/annuler, demande à l'utilisateur de copier l'ID depuis la colonne 'ID' (Agenda).",
-    };
-
-    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer " + process.env.OPENAI_API_KEY,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: model,
-        temperature: 0.45,
-        messages: [
-          { role: "system", content: buildSystemPrompt(vertical) },
-          { role: "user", content: JSON.stringify(payload, null, 2) },
-        ],
-      }),
+    const response = await client.responses.create({
+      model: MODEL,
+      input: [
+        { role: "developer", content: buildSystemPrompt(vertical) },
+        { role: "user", content: JSON.stringify(userPayload, null, 2) },
+      ],
     });
 
-    if (!r.ok) {
-      const t = await r.text();
-      return res.status(500).json({ error: "openai_error", status: r.status, message: t });
-    }
-
-    const data = await r.json();
-    const raw = (data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "";
-
+    const raw = response.output_text || "";
     const json = extractJsonBlock(raw);
     const reply = stripJsonBlock(raw);
 
     return res.status(200).json({
-      reply: reply,
-      actions: (json && json.actions) ? json.actions : [],
-      slots: slots,
+      reply: reply || "Je suis là. Dites-moi ce que vous souhaitez faire 🙂",
+      actions: Array.isArray(json?.actions) ? json.actions : [],
+      slots,
     });
   } catch (err) {
-    return res.status(500).json({ error: "server_error", message: String(err && err.message ? err.message : err) });
+    console.error(err);
+    return res.status(500).json({
+      error: "server_error",
+      message: String(err?.message || err),
+    });
   }
 }
+
 
